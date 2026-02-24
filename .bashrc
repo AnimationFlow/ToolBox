@@ -54,3 +54,12 @@ alias dl='dc logs'      # logs
 alias dlf='dc logs -f'  # logs, follow (streaming)
 alias drl='dcr && dl'   # restart and show logs
 alias drlf='dcr && dlf' # restart and show logs, follow
+
+
+##################
+# bash shortcuts #
+##################
+
+alias c='clear'
+alias h='history'
+alias lh='ls -lah'
