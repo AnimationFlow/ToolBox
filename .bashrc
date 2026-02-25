@@ -63,3 +63,4 @@ alias drlf='dcr && dlf' # restart and show logs, follow
 alias c='clear'
 alias h='history'
 alias lh='ls -lah'
+alias v='python3 -m venv .venv && source .venv/bin/activate'
