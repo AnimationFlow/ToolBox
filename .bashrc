@@ -26,19 +26,34 @@ fi
 unset color_prompt force_color_prompt
 
 
+##################
+# bash shortcuts #
+##################
+
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias lh='ls -alh'
+alias c='clear'
+alias h='history'
+alias v='python3 -m venv .venv && source .venv/bin/activate'
+
+
 ####################
 # podman shortcuts #
 ####################
 
 alias pc='podman-compose'
-alias pps='pc ps'       # processes
-alias pcu='pc up -d'    # up detached
-alias pcd='pc down'     # shut down
-alias pcr='pcd && pcu'  # restart
-alias pl='pc logs'      # logs
-alias plf='pc logs -f'  # logs, follow (streaming)
-alias prl='pcr && pl'   # restart and show logs
-alias prlf='pcr && plf' # restart and show logs, follow
+alias pps='pc ps'           # processes
+alias pcw='pc watch'        # experimental hot-reload that rebuilds on file changes automatically
+alias pcb='pc up --build'   # builds without starting
+alias pcu='pc up -d'        # up detached
+alias pcd='pc down'         # shut down
+alias pcr='pcd && pcu'      # restart
+alias pl='pc logs'          # logs
+alias plf='pc logs -f'      # logs, follow (streaming)
+alias prl='pcr && pl'       # restart and show logs
+alias prf='pcr && plf'      # restart and show logs, follow
 
 
 ####################
@@ -46,21 +61,13 @@ alias prlf='pcr && plf' # restart and show logs, follow
 ####################
 
 alias dc='docker-compose'
-alias dps='dc ps'       # processes
-alias dcu='dc up -d'    # up detached
-alias dcd='dc down'     # shut down
-alias dcr='dcd && dcu'  # restart
-alias dl='dc logs'      # logs
-alias dlf='dc logs -f'  # logs, follow (streaming)
-alias drl='dcr && dl'   # restart and show logs
-alias drlf='dcr && dlf' # restart and show logs, follow
-
-
-##################
-# bash shortcuts #
-##################
-
-alias c='clear'
-alias h='history'
-alias lh='ls -lah'
-alias v='python3 -m venv .venv && source .venv/bin/activate'
+alias dps='dc ps'           # processes
+alias dcw='dc watch'        # experimental hot-reload that rebuilds on file changes automatically
+alias dcb='dc up --build'   # builds without starting
+alias dcu='dc up -d'        # up detached
+alias dcd='dc down'         # shut down
+alias dcr='dcd && dcu'      # restart
+alias dl='dc logs'          # logs
+alias dlf='dc logs -f'      # logs, follow (streaming)
+alias drl='dcr && dl'       # restart and show logs
+alias drf='dcr && dlf'      # restart and show logs, follow
