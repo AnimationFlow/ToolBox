@@ -60,6 +60,54 @@ PYEOF
     fi
 }
 
+# Ensure loginctl linger is enabled so user services survive after logout
+_ensure_linger() {
+    [[ -f "/var/lib/systemd/linger/${USER}" ]] && return 0
+    warn "Linger is not enabled — services will stop when you log out."
+    read -rp "  Enable linger now? [Y/n] " _linger_ans
+    [[ "${_linger_ans,,}" == "n" ]] && return 0
+    loginctl enable-linger "$USER" && ok "Linger enabled."
+}
+
+# Detect or install a package manager; echoes "pnpm" or "npm", returns 1 on failure
+_ensure_pkg_mgr() {
+    # Fast path: pnpm already available
+    if command -v pnpm &>/dev/null; then echo "pnpm"; return 0; fi
+
+    # npm available but no pnpm — offer to install pnpm via npm
+    if command -v npm &>/dev/null; then
+        info "npm found but pnpm is not installed."
+        read -rp "  Install pnpm via npm (recommended)? [Y/n] " _pm_ans
+        if [[ "${_pm_ans,,}" != "n" ]]; then
+            npm install -g pnpm && export PATH="${PNPM_HOME}:$PATH"
+            if command -v pnpm &>/dev/null; then ok "pnpm installed."; echo "pnpm"; return 0; fi
+            warn "pnpm install failed, falling back to npm."
+        fi
+        echo "npm"; return 0
+    fi
+
+    # Nothing available — offer pnpm standalone (manages its own Node)
+    warn "Node.js / npm not found."
+    read -rp "  Install pnpm standalone (will also manage Node via pnpm env)? [Y/n] " _pm_ans
+    [[ "${_pm_ans,,}" == "n" ]] && { err "Cannot proceed without a package manager."; return 1; }
+
+    info "Installing pnpm standalone…"
+    curl -fsSL https://get.pnpm.io/install.sh | PNPM_HOME="$PNPM_HOME" sh - \
+        || { err "pnpm install failed."; return 1; }
+    export PATH="${PNPM_HOME}:$PATH"
+    if ! command -v pnpm &>/dev/null; then
+        err "pnpm not found after install — restart shell and rerun."; return 1
+    fi
+    ok "pnpm installed."
+
+    info "Installing Node.js LTS via pnpm env…"
+    pnpm env use --global lts \
+        && ok "Node.js LTS installed." \
+        || { err "Node install via pnpm failed."; return 1; }
+
+    echo "pnpm"; return 0
+}
+
 # ── instance discovery ────────────────────────────────────────────────────────
 # Returns the slug whose WorkingDirectory matches the given path, or empty string
 _slug_for_dir() {
@@ -238,13 +286,10 @@ main_menu() {
                 ;;
             u|U)
                 if [[ "$update_available" -eq 1 ]]; then
-                    if command -v npm &>/dev/null; then
-                        npm install -g @anthropic-ai/claude-code \
-                            && ok "Updated to ${latest_ver}." \
-                            || err "Update failed."
-                    else
-                        err "npm not found — cannot update automatically."
-                    fi
+                    local pkg_mgr; pkg_mgr=$(_ensure_pkg_mgr) || continue
+                    "$pkg_mgr" install -g @anthropic-ai/claude-code \
+                        && ok "Updated to ${latest_ver}." \
+                        || err "Update failed."
                     # Re-kick version check so display refreshes
                     rm -f "$_LATEST_VER_FILE"
                     _VER_CHECK_STARTED=0
@@ -386,6 +431,7 @@ new_instance_wizard() {
     wd_ans="${wd_ans:-y}"
 
     echo
+    _ensure_linger
     info "Creating instance '${rcname}' (${slug}) → ${workdir}"
     sep
 
@@ -436,6 +482,13 @@ EOF
         if is_active "claude-${slug}"; then
             ok "Instance '${rcname}' running."
             info "Attach: tmux -L ${slug} attach -t claude-${slug}"
+            # Warn if Claude Code has never been authenticated on this machine
+            if [[ ! -f "${HOME}/.claude/auth_config.json" ]] && \
+               ! python3 -c "import json,os; d=json.load(open(os.path.expanduser('~/.claude.json'))); exit(0 if d.get('oauthAccount') or d.get('apiKey') else 1)" 2>/dev/null; then
+                echo
+                warn "Claude Code does not appear to be authenticated."
+                info "Attach to the instance and complete login before use."
+            fi
         else
             err "Failed to start. Check: journalctl --user -u claude-${slug}"
         fi
@@ -700,29 +753,22 @@ mcp_menu() {
 
 # ── cc install ────────────────────────────────────────────────────────────────
 install_cc_menu() {
-    hdr "Install / Update Claude Code"
+    hdr "Install Claude Code"
 
-    if cc_installed; then
-        ok "Installed: $(cc_version)"
-        read -rp "  Re-install / update? [y/N] " ans
-        [[ "${ans,,}" == "y" ]] || return
-    fi
-
-    echo
     echo -e "  Install methods:"
-    echo -e "  ${BOLD}1)${RESET} npm  (npm install -g @anthropic-ai/claude-code)"
-    echo -e "  ${BOLD}2)${RESET} .deb (provide URL)"
+    echo -e "  ${BOLD}1)${RESET} pnpm / npm  (auto-detected, pnpm preferred)"
+    echo -e "  ${BOLD}2)${RESET} .deb package (provide URL)"
     echo -e "  ${BOLD}b)${RESET} Back"
     sep
     read -rp "  Choice: " choice
 
+    local installed=0
     case "$choice" in
         1)
-            if command -v npm &>/dev/null; then
-                npm install -g @anthropic-ai/claude-code && ok "Installed via npm."
-            else
-                err "npm not found. Install Node.js first."
-            fi
+            local pkg_mgr; pkg_mgr=$(_ensure_pkg_mgr) || return
+            "$pkg_mgr" install -g @anthropic-ai/claude-code \
+                && ok "Installed via ${pkg_mgr}." && installed=1 \
+                || err "Install failed."
             ;;
         2)
             read -rp "  .deb URL: " deb_url
@@ -730,19 +776,19 @@ install_cc_menu() {
             local deb="/tmp/claude-code-install.deb"
             info "Downloading…"
             curl -fL "$deb_url" -o "$deb" || { err "Download failed."; return; }
-            sudo dpkg -i "$deb" && rm -f "$deb" && ok "Installed."
+            sudo dpkg -i "$deb" && rm -f "$deb" && ok "Installed." && installed=1
             ;;
         b|B) return ;;
-        *) warn "Unknown option." ;;
+        *) warn "Unknown option."; return ;;
     esac
 
-    if cc_installed; then
+    if [[ "$installed" -eq 1 ]] && cc_installed; then
         _ensure_rc_json
-        # Ensure linger
-        if [[ ! -f "/var/lib/systemd/linger/${USER}" ]]; then
-            read -rp "  Enable linger (keep services alive after logout)? [Y/n] " ans
-            [[ "${ans,,}" == "n" ]] || { loginctl enable-linger "$USER" && ok "Linger enabled."; }
-        fi
+        _ensure_linger
+        echo
+        info "Installed: $(cc_version)"
+        info "Authenticate before creating instances: run 'claude' once interactively,"
+        info "or attach to a started instance and follow the login prompt there."
     fi
 }
 
