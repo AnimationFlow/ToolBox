@@ -26,6 +26,10 @@ sep()  { echo -e "${DIM}──────────────────�
 hdr()  { echo; echo -e "  ${BOLD}${CYAN}$*${RESET}"; sep; }
 pause(){ read -rp "  [press enter]" _; }
 
+# Ensure systemctl --user can reach the D-Bus session bus (needed when invoked from tmux/cron)
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+
 is_active()  { systemctl --user is-active  --quiet "$1" 2>/dev/null; }
 is_enabled() { systemctl --user is-enabled --quiet "$1" 2>/dev/null; }
 
@@ -87,7 +91,7 @@ _svc_field() {
         socket)  grep -oP '(?<=-L )\S+'        "$svc" | head -1 || echo "$slug" ;;
         session) grep -oP '(?<=-s )\S+'        "$svc" | head -1 || echo "claude-${slug}" ;;
         workdir) grep 'WorkingDirectory' "$svc" | cut -d= -f2 | head -1 | sed "s|%h|$HOME|g" ;;
-        rcname)  grep -oP "(?<=--name )\S+"    "$svc" | head -1 || echo "$slug" ;;
+        rcname)  grep -oP "(?<=--name )\S+"    "$svc" | head -1 | tr -d "'" || echo "$slug" ;;
     esac
 }
 
@@ -128,7 +132,7 @@ _instance_row() {
         wd_dot="${DIM}—${RESET}"
     fi
 
-    printf "  ${BOLD}%2d)${RESET} ${svc_dot} ${BOLD}%-16s${RESET}  proc:%-18b  wd:%b  ${DIM}%s${RESET}\n" \
+    printf "  ${BOLD}%3s)${RESET} ${svc_dot} ${BOLD}%-16s${RESET}  proc:%-18b  wd:%b  ${DIM}%s${RESET}\n" \
         "$idx" "$rcname" "$proc_info" "$wd_dot" "$workdir"
 }
 
