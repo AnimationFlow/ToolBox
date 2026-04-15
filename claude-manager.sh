@@ -222,7 +222,7 @@ instance_menu() {
         echo -e "  ${BOLD}1)${RESET} Start"
         echo -e "  ${BOLD}2)${RESET} Stop"
         echo -e "  ${BOLD}3)${RESET} Restart"
-        echo -e "  ${BOLD}4)${RESET} Attach tmux"
+        echo -e "  ${BOLD}4)${RESET} Attach tmux ( Ctrl+B, D to detach )"
         echo -e "  ${BOLD}5)${RESET} Service logs"
         echo -e "  ${BOLD}6)${RESET} Watchdog logs"
         if [[ -f "${SYSTEMD_DIR}/claude-watchdog-${slug}.timer" ]]; then
