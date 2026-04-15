@@ -11,11 +11,16 @@ WATCHDOG_LOG_DIR="${HOME}/.local/share/claude-watchdog"
 WATCHDOG_BIN_DIR="${HOME}/.local/bin"
 PNPM_HOME="${HOME}/.local/share/pnpm"
 SVC_PATH_ENV="PATH=${PNPM_HOME}:${HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-HANG_TIMEOUT=600
 
-# ── version check state (background, non-blocking) ────────────────────────────
+# ── self-update: resolve repo dir from script's real path ─────────────────────
+_SCRIPT_REAL="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+_TOOLBOX_DIR="$(dirname "$_SCRIPT_REAL")"
+
+# ── background check state ────────────────────────────────────────────────────
 _LATEST_VER_FILE=""
 _VER_CHECK_STARTED=0
+_SELF_UPDATE_FILE=""
+_SELF_UPDATE_STARTED=0
 
 # ── colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -200,6 +205,17 @@ _start_version_check() {
     ) &
 }
 
+_start_self_check() {
+    _SELF_UPDATE_FILE=$(mktemp /tmp/claude-manager-selfupdate.XXXXXX)
+    # Needs a git repo and a reachable remote; silently skips if not available
+    if [[ ! -d "${_TOOLBOX_DIR}/.git" ]]; then echo "" > "$_SELF_UPDATE_FILE"; return; fi
+    (
+        timeout 15 git -C "$_TOOLBOX_DIR" fetch origin --quiet 2>/dev/null || { echo "" > "$_SELF_UPDATE_FILE"; exit; }
+        count=$(git -C "$_TOOLBOX_DIR" log HEAD..origin/main --oneline -- claude-manager.sh 2>/dev/null | wc -l)
+        echo "${count//[[:space:]]/}"
+    ) > "$_SELF_UPDATE_FILE" &
+}
+
 # true (0) when $1 is strictly newer than $2 (semver sort)
 _ver_newer() {
     [[ "$1" == "$2" ]] && return 1
@@ -212,15 +228,26 @@ _cc_cur_ver() {
 
 # ── main menu ─────────────────────────────────────────────────────────────────
 main_menu() {
-    # Kick off background version check once per manager session
+    # Kick off background checks once per manager session
     if [[ "$_VER_CHECK_STARTED" -eq 0 ]]; then
         _start_version_check
         _VER_CHECK_STARTED=1
-        trap 'rm -f "$_LATEST_VER_FILE"' EXIT
+        trap 'rm -f "$_LATEST_VER_FILE" "$_SELF_UPDATE_FILE"' EXIT
+    fi
+    if [[ "$_SELF_UPDATE_STARTED" -eq 0 ]]; then
+        _start_self_check
+        _SELF_UPDATE_STARTED=1
     fi
 
     while true; do
         hdr "Claude Code Manager"
+
+        # Self-update check result
+        local self_update=0
+        if [[ -s "$_SELF_UPDATE_FILE" ]]; then
+            local _su_count; _su_count=$(cat "$_SELF_UPDATE_FILE")
+            [[ "$_su_count" =~ ^[0-9]+$ && "$_su_count" -gt 0 ]] && self_update=1
+        fi
 
         # CC status + background version result
         local cur_ver="" latest_ver="" update_available=0
@@ -231,12 +258,17 @@ main_menu() {
                 _ver_newer "$latest_ver" "$cur_ver" && update_available=1
             fi
             if [[ "$update_available" -eq 1 ]]; then
-                echo -e "  ${GREEN}${cur_ver}${RESET} ${YELLOW}→ ${latest_ver}${RESET}"
+                echo -e "  Claude Code : ${GREEN}${cur_ver}${RESET} ${YELLOW}→ ${latest_ver}${RESET}"
             else
-                echo -e "  ${GREEN}${cur_ver}${RESET}"
+                echo -e "  Claude Code : ${GREEN}${cur_ver}${RESET}"
             fi
         else
             echo -e "  Claude Code : ${RED}not installed${RESET}"
+        fi
+
+        # Self-update status
+        if [[ "$self_update" -eq 1 ]]; then
+            echo -e "  Manager: ${YELLOW}update available${RESET}"
         fi
 
         # Linger
@@ -269,6 +301,7 @@ main_menu() {
         elif [[ "$update_available" -eq 1 ]]; then
             echo -e "  ${BOLD}u)${RESET} Update to ${latest_ver}"
         fi
+        [[ "$self_update" -eq 1 ]] && echo -e "  ${BOLD}s)${RESET} Self-update manager"
         echo -e "  ${BOLD}q)${RESET} Quit"
         sep
         read -rp "  Choice: " choice
@@ -297,6 +330,20 @@ main_menu() {
                     _VER_CHECK_STARTED=1
                 else
                     warn "No update available."
+                fi
+                ;;
+            s|S)
+                if [[ "$self_update" -eq 1 ]]; then
+                    info "Pulling latest claude-manager.sh from repo…"
+                    if git -C "$_TOOLBOX_DIR" pull; then
+                        ok "Updated. Restarting manager…"
+                        sleep 1
+                        exec "$0" "$@"
+                    else
+                        err "git pull failed."
+                    fi
+                else
+                    warn "No self-update available."
                 fi
                 ;;
             ''|*[!0-9]*) warn "Unknown option." ;;
@@ -536,8 +583,7 @@ _create_watchdog() {
 #!/bin/bash
 LOG="${wlog}"
 TOKEN_STATE="${wtokens}"
-HANG_TIMEOUT=${HANG_TIMEOUT}
-FROZEN_CHECKS=3    # consecutive unchanged-token checks to declare stuck (3 × 5min = 15min confirmed frozen)
+FROZEN_CHECKS=3    # 3 × 5min timer = 15min of unchanged tokens → declare stuck
 
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -594,8 +640,9 @@ if echo "\$PANE_CONTENT" | grep -q "Resume from summary"; then
 fi
 rm -f "${wresume}"
 
-# The stopwatch "(Xh Xm Xs · ↓ N tokens)" only appears during active tool calls.
-# When Claude is waiting for user input there is no stopwatch — idle sessions are never restarted.
+# Stopwatch "(Xh Xm Xs · ↓ N tokens)" only appears during active tool calls.
+# Log elapsed + tokens every check. If tokens unchanged for FROZEN_CHECKS consecutive
+# checks (stopwatch keeps ticking = tool running but Claude isn't generating) → restart.
 TIME_STR=\$(echo "\$PANE_CONTENT" | grep -oE '([0-9]+h )?([0-9]+m )?[0-9]+s ·' | head -1 | sed 's/ ·\$//')
 
 if [ -z "\$TIME_STR" ]; then
@@ -604,41 +651,24 @@ if [ -z "\$TIME_STR" ]; then
     exit 0
 fi
 
-ELAPSED_SECS=\$(echo "\$TIME_STR" | awk '{
-    t=0
-    for(i=1;i<=NF;i++){
-        if(\$i~/h\$/) t+=int(\$i)*3600
-        else if(\$i~/m\$/) t+=int(\$i)*60
-        else if(\$i~/s\$/) t+=int(\$i)
-    }
-    print t
-}')
-
-# Extract token count from stopwatch — only moves when Claude is actively generating
 TOKEN_STR=\$(echo "\$PANE_CONTENT" | grep -oE '[0-9]+(\.[0-9]+)?k? tokens' | head -1)
 
-if [ "\$ELAPSED_SECS" -ge "\$HANG_TIMEOUT" ] && [ -n "\$TOKEN_STR" ]; then
-    # Read stored "token_count:frozen_count"
-    OLD_LINE=\$(cat "\$TOKEN_STATE" 2>/dev/null || echo ":")
-    OLD_TOKEN="\${OLD_LINE%%:*}"
-    OLD_COUNT="\${OLD_LINE##*:}"
+OLD_LINE=\$(cat "\$TOKEN_STATE" 2>/dev/null || echo ":")
+OLD_TOKEN="\${OLD_LINE%%:*}"
+OLD_COUNT="\${OLD_LINE##*:}"
 
-    if [ "\$TOKEN_STR" = "\$OLD_TOKEN" ]; then
-        FROZEN_COUNT=\$(( \${OLD_COUNT:-0} + 1 ))
-        if [ "\$FROZEN_COUNT" -ge "\$FROZEN_CHECKS" ]; then
-            echo "[\$(timestamp)] INTERVENED: tool call frozen for \${ELAPSED_SECS}s (tokens stuck at \${TOKEN_STR} for \${FROZEN_COUNT} checks), restarting claude-${slug}" | tee -a "\$LOG"
-            rm -f "\$TOKEN_STATE"
-            systemctl --user restart claude-${slug}
-        else
-            echo "[\$(timestamp)] tool call running for \${ELAPSED_SECS}s (tokens unchanged: \${TOKEN_STR}, check \${FROZEN_COUNT}/\${FROZEN_CHECKS})" >> "\$LOG"
-            echo "\${TOKEN_STR}:\${FROZEN_COUNT}" > "\$TOKEN_STATE"
-        fi
+if [ -n "\$OLD_TOKEN" ] && [ "\$TOKEN_STR" = "\$OLD_TOKEN" ]; then
+    FROZEN_COUNT=\$(( \${OLD_COUNT:-0} + 1 ))
+    if [ "\$FROZEN_COUNT" -ge "\$FROZEN_CHECKS" ]; then
+        echo "[\$(timestamp)] INTERVENED: tokens stuck at \${TOKEN_STR} for \${FROZEN_COUNT} checks (\${TIME_STR}), restarting claude-${slug}" | tee -a "\$LOG"
+        rm -f "\$TOKEN_STATE"
+        systemctl --user restart claude-${slug}
     else
-        echo "[\$(timestamp)] tool call running for \${ELAPSED_SECS}s (tokens active: \${TOKEN_STR})" >> "\$LOG"
-        echo "\${TOKEN_STR}:0" > "\$TOKEN_STATE"
+        echo "[\$(timestamp)] running \${TIME_STR} — tokens unchanged: \${TOKEN_STR} (\${FROZEN_COUNT}/\${FROZEN_CHECKS})" >> "\$LOG"
+        echo "\${TOKEN_STR}:\${FROZEN_COUNT}" > "\$TOKEN_STATE"
     fi
 else
-    echo "[\$(timestamp)] tool call running for \${ELAPSED_SECS}s, waiting..." >> "\$LOG"
+    echo "[\$(timestamp)] running \${TIME_STR} — tokens: \${TOKEN_STR}" >> "\$LOG"
     echo "\${TOKEN_STR}:0" > "\$TOKEN_STATE"
 fi
 WEOF
