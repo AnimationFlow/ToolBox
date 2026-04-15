@@ -403,9 +403,11 @@ if echo "\$PANE_CONTENT" | grep -q "rate-limit-options\|Stop and wait for limit"
     exit 0
 fi
 
-# Scroll prompt — dismiss with Escape
-if echo "\$PANE_CONTENT" | grep -q "to scroll · Space, Enter, or Escape to dismiss"; then
-    echo "[\$(timestamp)] scroll prompt detected, sending Escape" >> "\$LOG"
+# Scroll prompt — blocking dialog takes over the whole pane, so the ❯ prompt disappears.
+# Only dismiss if scroll hint is present AND no ❯ prompt visible (rules out tool output).
+if echo "\$PANE_CONTENT" | grep -q "to scroll · Space, Enter, or Escape to dismiss" && \
+   ! echo "\$PANE_CONTENT" | grep -q "^❯"; then
+    echo "[\$(timestamp)] scroll prompt detected (no input prompt visible), sending Escape" >> "\$LOG"
     tmux -L ${socket} send-keys -t ${session} Escape
     exit 0
 fi
