@@ -231,12 +231,12 @@ main_menu() {
                 _ver_newer "$latest_ver" "$cur_ver" && update_available=1
             fi
             if [[ "$update_available" -eq 1 ]]; then
-                echo -e "  CC: ${GREEN}${cur_ver}${RESET} ${YELLOW}→ ${latest_ver}${RESET}"
+                echo -e "  ${GREEN}${cur_ver}${RESET} ${YELLOW}→ ${latest_ver}${RESET}"
             else
-                echo -e "  CC: ${GREEN}${cur_ver}${RESET}"
+                echo -e "  ${GREEN}${cur_ver}${RESET}"
             fi
         else
-            echo -e "  CC: ${RED}not installed${RESET}"
+            echo -e "  Claude Code : ${RED}not installed${RESET}"
         fi
 
         # Linger
@@ -528,13 +528,16 @@ _create_watchdog() {
     local script="${WATCHDOG_BIN_DIR}/claude-watchdog-${slug}.sh"
     local wlog="${WATCHDOG_LOG_DIR}/${slug}.log"
     local wresume="${WATCHDOG_LOG_DIR}/${slug}.resume"
+    local wtokens="${WATCHDOG_LOG_DIR}/${slug}.tokens"
 
     mkdir -p "$WATCHDOG_LOG_DIR"
 
     cat > "$script" <<WEOF
 #!/bin/bash
 LOG="${wlog}"
+TOKEN_STATE="${wtokens}"
 HANG_TIMEOUT=${HANG_TIMEOUT}
+FROZEN_CHECKS=3    # consecutive unchanged-token checks to declare stuck (3 × 5min = 15min confirmed frozen)
 
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -596,7 +599,9 @@ rm -f "${wresume}"
 TIME_STR=\$(echo "\$PANE_CONTENT" | grep -oE '([0-9]+h )?([0-9]+m )?[0-9]+s ·' | head -1 | sed 's/ ·\$//')
 
 if [ -z "\$TIME_STR" ]; then
-    log_ok; exit 0
+    rm -f "\$TOKEN_STATE"
+    log_ok
+    exit 0
 fi
 
 ELAPSED_SECS=\$(echo "\$TIME_STR" | awk '{
@@ -609,11 +614,32 @@ ELAPSED_SECS=\$(echo "\$TIME_STR" | awk '{
     print t
 }')
 
-if [ "\$ELAPSED_SECS" -ge "\$HANG_TIMEOUT" ]; then
-    echo "[\$(timestamp)] INTERVENED: tool call running for \${ELAPSED_SECS}s (>=\${HANG_TIMEOUT}s), restarting claude-${slug}" | tee -a "\$LOG"
-    systemctl --user restart claude-${slug}
+# Extract token count from stopwatch — only moves when Claude is actively generating
+TOKEN_STR=\$(echo "\$PANE_CONTENT" | grep -oE '[0-9]+(\.[0-9]+)?k? tokens' | head -1)
+
+if [ "\$ELAPSED_SECS" -ge "\$HANG_TIMEOUT" ] && [ -n "\$TOKEN_STR" ]; then
+    # Read stored "token_count:frozen_count"
+    OLD_LINE=\$(cat "\$TOKEN_STATE" 2>/dev/null || echo ":")
+    OLD_TOKEN="\${OLD_LINE%%:*}"
+    OLD_COUNT="\${OLD_LINE##*:}"
+
+    if [ "\$TOKEN_STR" = "\$OLD_TOKEN" ]; then
+        FROZEN_COUNT=\$(( \${OLD_COUNT:-0} + 1 ))
+        if [ "\$FROZEN_COUNT" -ge "\$FROZEN_CHECKS" ]; then
+            echo "[\$(timestamp)] INTERVENED: tool call frozen for \${ELAPSED_SECS}s (tokens stuck at \${TOKEN_STR} for \${FROZEN_COUNT} checks), restarting claude-${slug}" | tee -a "\$LOG"
+            rm -f "\$TOKEN_STATE"
+            systemctl --user restart claude-${slug}
+        else
+            echo "[\$(timestamp)] tool call running for \${ELAPSED_SECS}s (tokens unchanged: \${TOKEN_STR}, check \${FROZEN_COUNT}/\${FROZEN_CHECKS})" >> "\$LOG"
+            echo "\${TOKEN_STR}:\${FROZEN_COUNT}" > "\$TOKEN_STATE"
+        fi
+    else
+        echo "[\$(timestamp)] tool call running for \${ELAPSED_SECS}s (tokens active: \${TOKEN_STR})" >> "\$LOG"
+        echo "\${TOKEN_STR}:0" > "\$TOKEN_STATE"
+    fi
 else
     echo "[\$(timestamp)] tool call running for \${ELAPSED_SECS}s, waiting..." >> "\$LOG"
+    echo "\${TOKEN_STR}:0" > "\$TOKEN_STATE"
 fi
 WEOF
     chmod +x "$script"
@@ -652,6 +678,7 @@ _remove_watchdog() {
     rm -f "${SYSTEMD_DIR}/claude-watchdog-${slug}.timer"
     rm -f "${SYSTEMD_DIR}/claude-watchdog-${slug}.service"
     rm -f "${WATCHDOG_BIN_DIR}/claude-watchdog-${slug}.sh"
+    rm -f "${WATCHDOG_LOG_DIR}/${slug}.tokens"
     systemctl --user daemon-reload
 }
 
@@ -670,7 +697,7 @@ delete_instance() {
     _remove_watchdog "$slug"
     tmux -L "$socket" kill-server 2>/dev/null || true
     rm -f "${SYSTEMD_DIR}/claude-${slug}.service"
-    rm -f "${WATCHDOG_LOG_DIR}/${slug}.log" "${WATCHDOG_LOG_DIR}/${slug}.state" "${WATCHDOG_LOG_DIR}/${slug}.hang"
+    rm -f "${WATCHDOG_LOG_DIR}/${slug}.log" "${WATCHDOG_LOG_DIR}/${slug}.tokens" "${WATCHDOG_LOG_DIR}/${slug}.state" "${WATCHDOG_LOG_DIR}/${slug}.hang"
     systemctl --user daemon-reload
     ok "Instance '${rcname}' deleted."
 }
