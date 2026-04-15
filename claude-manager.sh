@@ -13,6 +13,10 @@ PNPM_HOME="${HOME}/.local/share/pnpm"
 SVC_PATH_ENV="PATH=${PNPM_HOME}:${HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 HANG_TIMEOUT=600
 
+# ── version check state (background, non-blocking) ────────────────────────────
+_LATEST_VER_FILE=""
+_VER_CHECK_STARTED=0
+
 # ── colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
@@ -136,17 +140,57 @@ _instance_row() {
         "$idx" "$rcname" "$proc_info" "$wd_dot" "$workdir"
 }
 
+# ── version helpers ───────────────────────────────────────────────────────────
+_start_version_check() {
+    _LATEST_VER_FILE=$(mktemp /tmp/claude-manager-ver.XXXXXX)
+    (
+        local v
+        v=$(curl -s --max-time 8 \
+            https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2>/dev/null)
+        echo "${v:-}" > "$_LATEST_VER_FILE"
+    ) &
+}
+
+# true (0) when $1 is strictly newer than $2 (semver sort)
+_ver_newer() {
+    [[ "$1" == "$2" ]] && return 1
+    [[ "$(printf '%s\n%s' "$1" "$2" | sort -V | tail -1)" == "$1" ]]
+}
+
+_cc_cur_ver() {
+    "$CLAUDE_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1
+}
+
 # ── main menu ─────────────────────────────────────────────────────────────────
 main_menu() {
+    # Kick off background version check once per manager session
+    if [[ "$_VER_CHECK_STARTED" -eq 0 ]]; then
+        _start_version_check
+        _VER_CHECK_STARTED=1
+        trap 'rm -f "$_LATEST_VER_FILE"' EXIT
+    fi
+
     while true; do
         hdr "Claude Code Manager"
 
-        # CC status
+        # CC status + background version result
+        local cur_ver="" latest_ver="" update_available=0
         if cc_installed; then
-            echo -e "  CC: ${GREEN}$(cc_version)${RESET}"
+            cur_ver=$(_cc_cur_ver)
+            if [[ -s "$_LATEST_VER_FILE" ]]; then
+                latest_ver=$(cat "$_LATEST_VER_FILE")
+                _ver_newer "$latest_ver" "$cur_ver" && update_available=1
+            fi
+            if [[ "$update_available" -eq 1 ]]; then
+                echo -e "  CC: ${GREEN}${cur_ver}${RESET} ${YELLOW}→ ${latest_ver}${RESET}"
+            else
+                echo -e "  CC: ${GREEN}${cur_ver}${RESET}"
+            fi
         else
             echo -e "  CC: ${RED}not installed${RESET}"
         fi
+
         # Linger
         [[ -f "/var/lib/systemd/linger/${USER}" ]] \
             && echo -e "  Linger: ${GREEN}enabled${RESET}" \
@@ -172,7 +216,11 @@ main_menu() {
 
         echo -e "  ${BOLD}n)${RESET} New instance"
         echo -e "  ${BOLD}m)${RESET} Manage MCPs (context7, mcp-installer)"
-        echo -e "  ${BOLD}i)${RESET} Install / update Claude Code"
+        if ! cc_installed; then
+            echo -e "  ${BOLD}i)${RESET} Install Claude Code"
+        elif [[ "$update_available" -eq 1 ]]; then
+            echo -e "  ${BOLD}u)${RESET} Update to ${latest_ver}"
+        fi
         echo -e "  ${BOLD}q)${RESET} Quit"
         sep
         read -rp "  Choice: " choice
@@ -181,7 +229,31 @@ main_menu() {
             q|Q) echo; ok "Bye."; echo; exit 0 ;;
             n|N) new_instance_wizard ;;
             m|M) mcp_menu ;;
-            i|I) install_cc_menu ;;
+            i|I)
+                if ! cc_installed; then
+                    install_cc_menu
+                else
+                    warn "Already installed. Wait for version check or use u) to update."
+                fi
+                ;;
+            u|U)
+                if [[ "$update_available" -eq 1 ]]; then
+                    if command -v npm &>/dev/null; then
+                        npm install -g @anthropic-ai/claude-code \
+                            && ok "Updated to ${latest_ver}." \
+                            || err "Update failed."
+                    else
+                        err "npm not found — cannot update automatically."
+                    fi
+                    # Re-kick version check so display refreshes
+                    rm -f "$_LATEST_VER_FILE"
+                    _VER_CHECK_STARTED=0
+                    _start_version_check
+                    _VER_CHECK_STARTED=1
+                else
+                    warn "No update available."
+                fi
+                ;;
             ''|*[!0-9]*) warn "Unknown option." ;;
             *)
                 local idx=$(( choice - 1 ))
