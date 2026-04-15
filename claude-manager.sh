@@ -230,6 +230,7 @@ instance_menu() {
         else
             echo -e "  ${BOLD}7)${RESET} Add watchdog"
         fi
+        echo -e "  ${BOLD}r)${RESET} Rename display name"
         echo -e "  ${BOLD}m)${RESET} Manage MCPs"
         echo -e "  ${BOLD}d)${RESET} Delete instance"
         echo -e "  ${BOLD}b)${RESET} Back"
@@ -263,6 +264,11 @@ instance_menu() {
                     systemctl --user enable --now "claude-watchdog-${slug}.timer" && ok "Timer enabled."
                 fi
                 ;;
+            r|R)
+                _rename_display_name "$slug"
+                # refresh local rcname after rename
+                rcname=$(_svc_field "$slug" rcname)
+                ;;
             m|M) mcp_menu ;;
             d|D) delete_instance "$slug"; return ;;
             b|B) return ;;
@@ -277,8 +283,10 @@ new_instance_wizard() {
 
     hdr "New Claude Code Instance"
 
-    # Name
-    read -rp "  Instance name (e.g. MyProject): " rcname
+    # Name — default to the folder name
+    local default_name; default_name=$(basename "$default_dir")
+    read -rp "  Instance name [${default_name}]: " rcname
+    rcname="${rcname:-$default_name}"
     [[ -n "$rcname" ]] || { warn "Name cannot be empty."; return; }
 
     local slug
@@ -361,6 +369,32 @@ EOF
         fi
     fi
     echo
+}
+
+# ── rename display name ───────────────────────────────────────────────────────
+_rename_display_name() {
+    local slug="$1"
+    local svc="${SYSTEMD_DIR}/claude-${slug}.service"
+    local old_name; old_name=$(_svc_field "$slug" rcname)
+
+    read -rp "  New display name [${old_name}]: " new_name
+    new_name="${new_name:-$old_name}"
+    [[ "$new_name" == "$old_name" ]] && { info "No change."; return; }
+
+    python3 - "$svc" "$new_name" "$old_name" <<'PYEOF'
+import sys
+path, new, old = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    content = f.read()
+content = content.replace(f"--name '{old}'", f"--name '{new}'")
+content = content.replace(f"Description=Claude Code Remote Control - {old}",
+                          f"Description=Claude Code Remote Control - {new}")
+with open(path, 'w') as f:
+    f.write(content)
+PYEOF
+
+    systemctl --user daemon-reload
+    ok "Renamed '${old_name}' → '${new_name}'. Restart instance to apply."
 }
 
 # ── watchdog creation / removal ───────────────────────────────────────────────
