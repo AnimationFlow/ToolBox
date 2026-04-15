@@ -403,6 +403,13 @@ if echo "\$PANE_CONTENT" | grep -q "rate-limit-options\|Stop and wait for limit"
     exit 0
 fi
 
+# Scroll prompt — dismiss with Escape
+if echo "\$PANE_CONTENT" | grep -q "to scroll · Space, Enter, or Escape to dismiss"; then
+    echo "[\$(timestamp)] scroll prompt detected, sending Escape" >> "\$LOG"
+    tmux -L ${socket} send-keys -t ${session} Escape
+    exit 0
+fi
+
 if echo "\$PANE_CONTENT" | grep -q "Resume from summary"; then
     RESUME_STATE="${wresume}"
     RESUME_COUNT=\$(cat "\$RESUME_STATE" 2>/dev/null || echo 0)
