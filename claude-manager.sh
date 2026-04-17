@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.1.1"
+MANAGER_VERSION="1.1.2"
 MANAGER_DATE="2026-04-17"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
@@ -139,7 +139,7 @@ list_instances() {
         [[ "$base" == claude-watchdog-* ]] && continue
         names+=("${base#claude-}")
     done
-    printf '%s\n' "${names[@]}"
+    [[ ${#names[@]} -gt 0 ]] && printf '%s\n' "${names[@]}"
 }
 
 _svc_field() {
