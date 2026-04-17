@@ -210,18 +210,20 @@ _start_version_check() {
 }
 
 _start_self_check() {
+    # File stays empty if no update; contains the downloaded script if newer version found.
     _SELF_UPDATE_FILE=$(mktemp /tmp/claude-manager-selfupdate.XXXXXX)
     local local_ver="$MANAGER_VERSION"
     (
-        remote_ver=$(curl -fsSL --max-time 10 "$_MANAGER_RAW_URL" 2>/dev/null \
-            | grep -m1 '^MANAGER_VERSION=' | cut -d'"' -f2)
-        if [[ -n "$remote_ver" ]] && [[ "$remote_ver" != "$local_ver" ]] && \
-           [[ "$(printf '%s\n%s' "$remote_ver" "$local_ver" | sort -V | tail -1)" == "$remote_ver" ]]; then
-            echo "$remote_ver"
-        else
-            echo ""
+        local tmp; tmp=$(mktemp /tmp/claude-manager-dl.XXXXXX)
+        if curl -fsSL --max-time 10 "$_MANAGER_RAW_URL" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+            local remote_ver; remote_ver=$(grep -m1 '^MANAGER_VERSION=' "$tmp" | cut -d'"' -f2)
+            if [[ -n "$remote_ver" ]] && [[ "$remote_ver" != "$local_ver" ]] && \
+               [[ "$(printf '%s\n%s' "$remote_ver" "$local_ver" | sort -V | tail -1)" == "$remote_ver" ]]; then
+                cat "$tmp" > "$_SELF_UPDATE_FILE"
+            fi
         fi
-    ) > "$_SELF_UPDATE_FILE" &
+        rm -f "$tmp"
+    ) &
 }
 
 # true (0) when $1 is strictly newer than $2 (semver sort)
@@ -253,7 +255,7 @@ main_menu() {
         # Self-update check result
         local self_update=0 remote_mgr_ver=""
         if [[ -s "$_SELF_UPDATE_FILE" ]]; then
-            remote_mgr_ver=$(cat "$_SELF_UPDATE_FILE")
+            remote_mgr_ver=$(grep -m1 '^MANAGER_VERSION=' "$_SELF_UPDATE_FILE" | cut -d'"' -f2)
             [[ -n "$remote_mgr_ver" ]] && self_update=1
         fi
 
@@ -338,19 +340,11 @@ main_menu() {
                 ;;
             s|S)
                 if [[ "$self_update" -eq 1 ]]; then
-                    info "Downloading latest claude-manager.sh…"
-                    local _tmp; _tmp=$(mktemp)
-                    if curl -fsSL --max-time 30 "$_MANAGER_RAW_URL" -o "$_tmp" 2>/dev/null && \
-                       [[ -s "$_tmp" ]]; then
-                        cp "$_tmp" "$_SCRIPT_REAL" && chmod +x "$_SCRIPT_REAL"
-                        rm -f "$_tmp"
-                        ok "Updated to ${remote_mgr_ver}. Restarting manager…"
-                        sleep 1
-                        exec "$0" "$@"
-                    else
-                        rm -f "$_tmp"
-                        err "Download failed."
-                    fi
+                    info "Applying update…"
+                    cat "$_SELF_UPDATE_FILE" > "$_SCRIPT_REAL"
+                    ok "Updated to ${remote_mgr_ver}. Restarting manager…"
+                    sleep 1
+                    exec "$0" "$@"
                 else
                     warn "No self-update available."
                 fi
