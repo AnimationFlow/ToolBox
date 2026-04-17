@@ -210,16 +210,16 @@ _start_version_check() {
 }
 
 _start_self_check() {
-    # File stays empty if no update; contains the downloaded script if newer version found.
+    # File stays empty if no update; contains new version string after auto-applying.
     _SELF_UPDATE_FILE=$(mktemp /tmp/claude-manager-selfupdate.XXXXXX)
-    local local_ver="$MANAGER_VERSION"
+    local local_ver="$MANAGER_VERSION" script_real="$_SCRIPT_REAL"
     (
         local tmp; tmp=$(mktemp /tmp/claude-manager-dl.XXXXXX)
         if curl -fsSL --max-time 10 "$_MANAGER_RAW_URL" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
             local remote_ver; remote_ver=$(grep -m1 '^MANAGER_VERSION=' "$tmp" | cut -d'"' -f2)
             if [[ -n "$remote_ver" ]] && [[ "$remote_ver" != "$local_ver" ]] && \
                [[ "$(printf '%s\n%s' "$remote_ver" "$local_ver" | sort -V | tail -1)" == "$remote_ver" ]]; then
-                cat "$tmp" > "$_SELF_UPDATE_FILE"
+                cat "$tmp" > "$script_real" && echo "$remote_ver" > "$_SELF_UPDATE_FILE"
             fi
         fi
         rm -f "$tmp"
@@ -250,14 +250,14 @@ main_menu() {
     fi
 
     while true; do
-        hdr "Claude Code Manager"
-
-        # Self-update check result
-        local self_update=0 remote_mgr_ver=""
+        # Auto-restart if background self-update was applied
         if [[ -s "$_SELF_UPDATE_FILE" ]]; then
-            remote_mgr_ver=$(grep -m1 '^MANAGER_VERSION=' "$_SELF_UPDATE_FILE" | cut -d'"' -f2)
-            [[ -n "$remote_mgr_ver" ]] && self_update=1
+            local new_ver; new_ver=$(cat "$_SELF_UPDATE_FILE")
+            echo; ok "Manager auto-updated to ${new_ver}. Restarting…"; sleep 1
+            exec "$0" "$@"
         fi
+
+        hdr "Claude Code Manager"
 
         # CC status + background version result
         local cur_ver="" latest_ver="" update_available=0
@@ -276,12 +276,7 @@ main_menu() {
             echo -e "  Claude Code : ${RED}not installed${RESET}  ${BOLD}i)${RESET} install"
         fi
 
-        # Manager version + self-update inline
-        if [[ "$self_update" -eq 1 ]]; then
-            echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET} ${YELLOW}→ ${remote_mgr_ver}${RESET}  ${BOLD}s)${RESET} self-update"
-        else
-            echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET}"
-        fi
+        echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET}"
 
         # Linger
         [[ -f "/var/lib/systemd/linger/${USER}" ]] \
@@ -336,17 +331,6 @@ main_menu() {
                     _VER_CHECK_STARTED=1
                 else
                     warn "No update available."
-                fi
-                ;;
-            s|S)
-                if [[ "$self_update" -eq 1 ]]; then
-                    info "Applying update…"
-                    cat "$_SELF_UPDATE_FILE" > "$_SCRIPT_REAL"
-                    ok "Updated to ${remote_mgr_ver}. Restarting manager…"
-                    sleep 1
-                    exec "$0" "$@"
-                else
-                    warn "No self-update available."
                 fi
                 ;;
             ''|*[!0-9]*) warn "Unknown option." ;;
