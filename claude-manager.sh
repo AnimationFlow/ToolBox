@@ -4,6 +4,8 @@
 set -uo pipefail
 
 MANAGER_VERSION="1.0.0"
+MANAGER_DATE="2026-04-17"
+_MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
@@ -209,12 +211,16 @@ _start_version_check() {
 
 _start_self_check() {
     _SELF_UPDATE_FILE=$(mktemp /tmp/claude-manager-selfupdate.XXXXXX)
-    # Needs a git repo and a reachable remote; silently skips if not available
-    if [[ ! -d "${_TOOLBOX_DIR}/.git" ]]; then echo "" > "$_SELF_UPDATE_FILE"; return; fi
+    local local_ver="$MANAGER_VERSION"
     (
-        timeout 15 git -C "$_TOOLBOX_DIR" fetch origin --quiet 2>/dev/null || { echo "" > "$_SELF_UPDATE_FILE"; exit; }
-        count=$(git -C "$_TOOLBOX_DIR" log HEAD..origin/main --oneline -- claude-manager.sh 2>/dev/null | wc -l)
-        echo "${count//[[:space:]]/}"
+        remote_ver=$(curl -fsSL --max-time 10 "$_MANAGER_RAW_URL" 2>/dev/null \
+            | grep -m1 '^MANAGER_VERSION=' | cut -d'"' -f2)
+        if [[ -n "$remote_ver" ]] && [[ "$remote_ver" != "$local_ver" ]] && \
+           [[ "$(printf '%s\n%s' "$remote_ver" "$local_ver" | sort -V | tail -1)" == "$remote_ver" ]]; then
+            echo "$remote_ver"
+        else
+            echo ""
+        fi
     ) > "$_SELF_UPDATE_FILE" &
 }
 
@@ -245,10 +251,10 @@ main_menu() {
         hdr "Claude Code Manager"
 
         # Self-update check result
-        local self_update=0
+        local self_update=0 remote_mgr_ver=""
         if [[ -s "$_SELF_UPDATE_FILE" ]]; then
-            local _su_count; _su_count=$(cat "$_SELF_UPDATE_FILE")
-            [[ "$_su_count" =~ ^[0-9]+$ && "$_su_count" -gt 0 ]] && self_update=1
+            remote_mgr_ver=$(cat "$_SELF_UPDATE_FILE")
+            [[ -n "$remote_mgr_ver" ]] && self_update=1
         fi
 
         # CC status + background version result
@@ -270,7 +276,7 @@ main_menu() {
 
         # Manager version + self-update inline
         if [[ "$self_update" -eq 1 ]]; then
-            echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET} ${YELLOW}update available${RESET}  ${BOLD}s)${RESET} self-update"
+            echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET} ${YELLOW}→ ${remote_mgr_ver}${RESET}  ${BOLD}s)${RESET} self-update"
         else
             echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET}"
         fi
@@ -332,13 +338,18 @@ main_menu() {
                 ;;
             s|S)
                 if [[ "$self_update" -eq 1 ]]; then
-                    info "Pulling latest claude-manager.sh from repo…"
-                    if git -C "$_TOOLBOX_DIR" pull; then
-                        ok "Updated. Restarting manager…"
+                    info "Downloading latest claude-manager.sh…"
+                    local _tmp; _tmp=$(mktemp)
+                    if curl -fsSL --max-time 30 "$_MANAGER_RAW_URL" -o "$_tmp" 2>/dev/null && \
+                       [[ -s "$_tmp" ]]; then
+                        cp "$_tmp" "$_SCRIPT_REAL" && chmod +x "$_SCRIPT_REAL"
+                        rm -f "$_tmp"
+                        ok "Updated to ${remote_mgr_ver}. Restarting manager…"
                         sleep 1
                         exec "$0" "$@"
                     else
-                        err "git pull failed."
+                        rm -f "$_tmp"
+                        err "Download failed."
                     fi
                 else
                     warn "No self-update available."
