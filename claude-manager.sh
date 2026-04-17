@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.0.0"
+MANAGER_VERSION="1.1.0"
 MANAGER_DATE="2026-04-17"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
@@ -23,7 +23,6 @@ _TOOLBOX_DIR="$(dirname "$_SCRIPT_REAL")"
 # ── background check state ────────────────────────────────────────────────────
 _LATEST_VER_FILE=""
 _VER_CHECK_STARTED=0
-_SELF_UPDATE_FILE=""
 _SELF_UPDATE_STARTED=0
 
 # ── colours ───────────────────────────────────────────────────────────────────
@@ -210,16 +209,14 @@ _start_version_check() {
 }
 
 _start_self_check() {
-    # File stays empty if no update; contains new version string after auto-applying.
-    _SELF_UPDATE_FILE=$(mktemp /tmp/claude-manager-selfupdate.XXXXXX)
-    local local_ver="$MANAGER_VERSION" script_real="$_SCRIPT_REAL"
+    local local_ver="$MANAGER_VERSION" script_real="$_SCRIPT_REAL" parent=$$
     (
         local tmp; tmp=$(mktemp /tmp/claude-manager-dl.XXXXXX)
         if curl -fsSL --max-time 10 "$_MANAGER_RAW_URL" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
             local remote_ver; remote_ver=$(grep -m1 '^MANAGER_VERSION=' "$tmp" | cut -d'"' -f2)
             if [[ -n "$remote_ver" ]] && [[ "$remote_ver" != "$local_ver" ]] && \
                [[ "$(printf '%s\n%s' "$remote_ver" "$local_ver" | sort -V | tail -1)" == "$remote_ver" ]]; then
-                cat "$tmp" > "$script_real" && echo "$remote_ver" > "$_SELF_UPDATE_FILE"
+                cat "$tmp" > "$script_real" && kill -USR1 "$parent"
             fi
         fi
         rm -f "$tmp"
@@ -242,21 +239,15 @@ main_menu() {
     if [[ "$_VER_CHECK_STARTED" -eq 0 ]]; then
         _start_version_check
         _VER_CHECK_STARTED=1
-        trap 'rm -f "$_LATEST_VER_FILE" "$_SELF_UPDATE_FILE"' EXIT
+        trap 'rm -f "$_LATEST_VER_FILE"' EXIT
     fi
     if [[ "$_SELF_UPDATE_STARTED" -eq 0 ]]; then
+        trap 'echo; ok "Manager updated. Restarting…"; sleep 1; exec "$0" "$@"' USR1
         _start_self_check
         _SELF_UPDATE_STARTED=1
     fi
 
     while true; do
-        # Auto-restart if background self-update was applied
-        if [[ -s "$_SELF_UPDATE_FILE" ]]; then
-            local new_ver; new_ver=$(cat "$_SELF_UPDATE_FILE")
-            echo; ok "Manager auto-updated to ${new_ver}. Restarting…"; sleep 1
-            exec "$0" "$@"
-        fi
-
         hdr "Claude Code Manager"
 
         # CC status + background version result
