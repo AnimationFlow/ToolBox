@@ -3,6 +3,8 @@
 
 set -uo pipefail
 
+MANAGER_VERSION="1.0.0"
+
 # ── paths ─────────────────────────────────────────────────────────────────────
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
 CLAUDE_BIN="${HOME}/.local/bin/claude"
@@ -258,23 +260,25 @@ main_menu() {
                 _ver_newer "$latest_ver" "$cur_ver" && update_available=1
             fi
             if [[ "$update_available" -eq 1 ]]; then
-                echo -e "  Claude Code : ${GREEN}${cur_ver}${RESET} ${YELLOW}→ ${latest_ver}${RESET}"
+                echo -e "  Claude Code : ${GREEN}${cur_ver}${RESET} ${YELLOW}→ ${latest_ver}${RESET}  ${BOLD}u)${RESET} update"
             else
                 echo -e "  Claude Code : ${GREEN}${cur_ver}${RESET}"
             fi
         else
-            echo -e "  Claude Code : ${RED}not installed${RESET}"
+            echo -e "  Claude Code : ${RED}not installed${RESET}  ${BOLD}i)${RESET} install"
         fi
 
-        # Self-update status
+        # Manager version + self-update inline
         if [[ "$self_update" -eq 1 ]]; then
-            echo -e "  Manager: ${YELLOW}update available${RESET}"
+            echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET} ${YELLOW}update available${RESET}  ${BOLD}s)${RESET} self-update"
+        else
+            echo -e "  Manager     : ${GREEN}${MANAGER_VERSION}${RESET}"
         fi
 
         # Linger
         [[ -f "/var/lib/systemd/linger/${USER}" ]] \
-            && echo -e "  Linger: ${GREEN}enabled${RESET}" \
-            || echo -e "  Linger: ${YELLOW}disabled${RESET}  (run: loginctl enable-linger $USER)"
+            && echo -e "  Linger      : ${GREEN}enabled${RESET}" \
+            || echo -e "  Linger      : ${YELLOW}disabled${RESET}  (run: loginctl enable-linger $USER)"
         sep
 
         # Instances
@@ -296,12 +300,6 @@ main_menu() {
 
         echo -e "  ${BOLD}n)${RESET} New instance"
         echo -e "  ${BOLD}m)${RESET} Manage MCPs (context7, mcp-installer)"
-        if ! cc_installed; then
-            echo -e "  ${BOLD}i)${RESET} Install Claude Code"
-        elif [[ "$update_available" -eq 1 ]]; then
-            echo -e "  ${BOLD}u)${RESET} Update to ${latest_ver}"
-        fi
-        [[ "$self_update" -eq 1 ]] && echo -e "  ${BOLD}s)${RESET} Self-update manager"
         echo -e "  ${BOLD}q)${RESET} Quit"
         sep
         read -rp "  Choice: " choice
