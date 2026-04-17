@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.1.2"
+MANAGER_VERSION="1.1.3"
 MANAGER_DATE="2026-04-17"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
@@ -114,6 +114,32 @@ _ensure_pkg_mgr() {
         || { err "Node install via pnpm failed."; return 1; }
 
     echo "pnpm"; return 0
+}
+
+# Detect or install tmux; echoes its full path, returns 1 on failure
+_ensure_tmux() {
+    local bin; bin=$(command -v tmux 2>/dev/null)
+    if [[ -n "$bin" ]]; then echo "$bin"; return 0; fi
+
+    warn "tmux not found."
+    read -rp "  Install tmux now? [Y/n] " _tmux_ans
+    [[ "${_tmux_ans,,}" == "n" ]] && { err "tmux is required to run instances."; return 1; }
+
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get install -y tmux || { err "apt-get install tmux failed."; return 1; }
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y tmux || { err "dnf install tmux failed."; return 1; }
+    elif command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm tmux || { err "pacman install tmux failed."; return 1; }
+    elif command -v zypper &>/dev/null; then
+        sudo zypper install -y tmux || { err "zypper install tmux failed."; return 1; }
+    else
+        err "No supported package manager found — install tmux manually."; return 1
+    fi
+
+    bin=$(command -v tmux 2>/dev/null) || { err "tmux still not found after install."; return 1; }
+    ok "tmux installed."
+    echo "$bin"
 }
 
 # ── instance discovery ────────────────────────────────────────────────────────
@@ -460,7 +486,7 @@ new_instance_wizard() {
     info "Creating instance '${rcname}' (${slug}) → ${workdir}"
     sep
 
-    local tmux_bin; tmux_bin=$(command -v tmux) || { err "tmux not found — install it first."; return 1; }
+    local tmux_bin; tmux_bin=$(_ensure_tmux) || return 1
 
     _ensure_rc_json
 
