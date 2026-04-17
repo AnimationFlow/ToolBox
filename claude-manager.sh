@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.1.0"
+MANAGER_VERSION="1.1.1"
 MANAGER_DATE="2026-04-17"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
@@ -460,6 +460,8 @@ new_instance_wizard() {
     info "Creating instance '${rcname}' (${slug}) → ${workdir}"
     sep
 
+    local tmux_bin; tmux_bin=$(command -v tmux) || { err "tmux not found — install it first."; return 1; }
+
     _ensure_rc_json
 
     # Service
@@ -474,7 +476,7 @@ Wants=network-online.target
 Type=forking
 Environment="${SVC_PATH_ENV}"
 WorkingDirectory=${workdir}
-ExecStart=/usr/bin/tmux -L ${slug} new-session -d -s claude-${slug} -c ${workdir} '${CLAUDE_BIN} -c --name ${rcname}'
+ExecStart=${tmux_bin} -L ${slug} new-session -d -s claude-${slug} -c ${workdir} '${CLAUDE_BIN} -c --name ${rcname}'
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
