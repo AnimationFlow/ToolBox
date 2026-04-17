@@ -594,6 +594,15 @@ log_ok() {
     echo "[\$(timestamp)] ok" >> "\$LOG"
 }
 
+trim_log() {
+    [ -s "\$LOG" ] || return
+    local cutoff tmp
+    cutoff=\$(date -d '3 days ago' '+%Y-%m-%d')
+    tmp=\$(mktemp)
+    awk -v d="\$cutoff" '{if(!/^\[/ || substr(\$1,2,10) >= d) print}' "\$LOG" > "\$tmp" && mv "\$tmp" "\$LOG"
+}
+trim_log
+
 CURRENT_CMD=\$(tmux -L ${socket} list-panes -t ${session} -F '#{pane_current_command}' 2>/dev/null)
 
 if [ -z "\$CURRENT_CMD" ]; then
@@ -692,8 +701,8 @@ EOF
 Description=Claude Code Watchdog Timer - ${slug}
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=2min
+OnBootSec=5min
+OnUnitActiveSec=5min
 AccuracySec=30s
 
 [Install]
