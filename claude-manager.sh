@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.1.3"
+MANAGER_VERSION="1.1.4"
 MANAGER_DATE="2026-04-17"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
@@ -84,34 +84,34 @@ _ensure_pkg_mgr() {
 
     # npm available but no pnpm — offer to install pnpm via npm
     if command -v npm &>/dev/null; then
-        info "npm found but pnpm is not installed."
+        info "npm found but pnpm is not installed." >&2
         read -rp "  Install pnpm via npm (recommended)? [Y/n] " _pm_ans
         if [[ "${_pm_ans,,}" != "n" ]]; then
-            npm install -g pnpm && export PATH="${PNPM_HOME}:$PATH"
-            if command -v pnpm &>/dev/null; then ok "pnpm installed."; echo "pnpm"; return 0; fi
-            warn "pnpm install failed, falling back to npm."
+            npm install -g pnpm >&2 && export PATH="${PNPM_HOME}:$PATH"
+            if command -v pnpm &>/dev/null; then ok "pnpm installed." >&2; echo "pnpm"; return 0; fi
+            warn "pnpm install failed, falling back to npm." >&2
         fi
         echo "npm"; return 0
     fi
 
     # Nothing available — offer pnpm standalone (manages its own Node)
-    warn "Node.js / npm not found."
+    warn "Node.js / npm not found." >&2
     read -rp "  Install pnpm standalone (will also manage Node via pnpm env)? [Y/n] " _pm_ans
-    [[ "${_pm_ans,,}" == "n" ]] && { err "Cannot proceed without a package manager."; return 1; }
+    [[ "${_pm_ans,,}" == "n" ]] && { err "Cannot proceed without a package manager." >&2; return 1; }
 
-    info "Installing pnpm standalone…"
-    curl -fsSL https://get.pnpm.io/install.sh | PNPM_HOME="$PNPM_HOME" sh - \
-        || { err "pnpm install failed."; return 1; }
+    info "Installing pnpm standalone…" >&2
+    curl -fsSL https://get.pnpm.io/install.sh | PNPM_HOME="$PNPM_HOME" sh - >&2 \
+        || { err "pnpm install failed." >&2; return 1; }
     export PATH="${PNPM_HOME}:$PATH"
     if ! command -v pnpm &>/dev/null; then
-        err "pnpm not found after install — restart shell and rerun."; return 1
+        err "pnpm not found after install — restart shell and rerun." >&2; return 1
     fi
-    ok "pnpm installed."
+    ok "pnpm installed." >&2
 
-    info "Installing Node.js LTS via pnpm env…"
-    pnpm env use --global lts \
-        && ok "Node.js LTS installed." \
-        || { err "Node install via pnpm failed."; return 1; }
+    info "Installing Node.js LTS via pnpm env…" >&2
+    pnpm env use --global lts >&2 \
+        && ok "Node.js LTS installed." >&2 \
+        || { err "Node install via pnpm failed." >&2; return 1; }
 
     echo "pnpm"; return 0
 }
@@ -121,24 +121,24 @@ _ensure_tmux() {
     local bin; bin=$(command -v tmux 2>/dev/null)
     if [[ -n "$bin" ]]; then echo "$bin"; return 0; fi
 
-    warn "tmux not found."
+    warn "tmux not found." >&2
     read -rp "  Install tmux now? [Y/n] " _tmux_ans
-    [[ "${_tmux_ans,,}" == "n" ]] && { err "tmux is required to run instances."; return 1; }
+    [[ "${_tmux_ans,,}" == "n" ]] && { err "tmux is required to run instances." >&2; return 1; }
 
     if command -v apt-get &>/dev/null; then
-        sudo apt-get install -y tmux || { err "apt-get install tmux failed."; return 1; }
+        sudo apt-get install -y tmux >&2 || { err "apt-get install tmux failed." >&2; return 1; }
     elif command -v dnf &>/dev/null; then
-        sudo dnf install -y tmux || { err "dnf install tmux failed."; return 1; }
+        sudo dnf install -y tmux >&2 || { err "dnf install tmux failed." >&2; return 1; }
     elif command -v pacman &>/dev/null; then
-        sudo pacman -S --noconfirm tmux || { err "pacman install tmux failed."; return 1; }
+        sudo pacman -S --noconfirm tmux >&2 || { err "pacman install tmux failed." >&2; return 1; }
     elif command -v zypper &>/dev/null; then
-        sudo zypper install -y tmux || { err "zypper install tmux failed."; return 1; }
+        sudo zypper install -y tmux >&2 || { err "zypper install tmux failed." >&2; return 1; }
     else
-        err "No supported package manager found — install tmux manually."; return 1
+        err "No supported package manager found — install tmux manually." >&2; return 1
     fi
 
-    bin=$(command -v tmux 2>/dev/null) || { err "tmux still not found after install."; return 1; }
-    ok "tmux installed."
+    bin=$(command -v tmux 2>/dev/null) || { err "tmux still not found after install." >&2; return 1; }
+    ok "tmux installed." >&2
     echo "$bin"
 }
 
