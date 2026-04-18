@@ -37,6 +37,7 @@ alias lh='ls -alh'
 alias c='clear'
 alias h='history'
 alias v='python3 -m venv .venv && source .venv/bin/activate'
+alias psg="ps aux | head -n1; ps aux | grep"
 
 
 ####################
