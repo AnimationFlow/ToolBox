@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.1.4"
+MANAGER_VERSION="1.2.0"
 MANAGER_DATE="2026-04-17"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
@@ -654,6 +654,30 @@ if echo "\$PANE_CONTENT" | grep -q "Resume from summary"; then
     exit 0
 fi
 rm -f "${wresume}"
+
+# Rate limit cooldown — schedule "continue" +60s after reset, log-based dedup
+if echo "\$PANE_CONTENT" | grep -qE 'resets [A-Za-z]+ [0-9]+, [0-9]+[ap]m'; then
+    LIMIT_LINE=\$(echo "\$PANE_CONTENT" | grep -oE 'resets [A-Za-z]+ [0-9]+, [0-9]+[ap]m \([^)]+\)' | head -1)
+    RESET_STR=\$(echo "\$LIMIT_LINE" | grep -oE '[A-Za-z]+ [0-9]+, [0-9]+[ap]m')
+    RESET_TZ=\$(echo "\$LIMIT_LINE" | sed 's/.*(\([^)]*\))/\1/')
+    RESET_TS=\$(TZ="\${RESET_TZ:-UTC}" date -d "\$(echo "\$RESET_STR" | sed 's/,//')" +%s 2>/dev/null)
+    if [[ -n "\$RESET_TS" ]]; then
+        if grep -q "rate limit.*scheduled.*\${RESET_STR}" "\$LOG" 2>/dev/null; then
+            echo "[\$(timestamp)] rate limit: timer already pending (resets \${RESET_STR} \${RESET_TZ})" >> "\$LOG"
+        else
+            SLEEP_SECS=\$(( RESET_TS - \$(date +%s) + 60 ))
+            [[ \$SLEEP_SECS -lt 60 ]] && SLEEP_SECS=60
+            systemd-run --user --on-active="\${SLEEP_SECS}s" \
+                --description="Claude rate limit resume - ${slug}" \
+                -- tmux -L ${socket} send-keys -t ${session} continue Enter 2>/dev/null \
+            && echo "[\$(timestamp)] rate limit: 'continue' scheduled in \${SLEEP_SECS}s (resets \${RESET_STR} \${RESET_TZ})" >> "\$LOG" \
+            || echo "[\$(timestamp)] rate limit: failed to schedule timer (resets \${RESET_STR} \${RESET_TZ})" >> "\$LOG"
+        fi
+    else
+        echo "[\$(timestamp)] rate limit: could not parse reset time from: \${LIMIT_LINE}" >> "\$LOG"
+    fi
+    log_ok; exit 0
+fi
 
 # Stopwatch "(Xh Xm Xs · ↓ N tokens)" only appears during active tool calls.
 # Log elapsed + tokens every check. If tokens unchanged for FROZEN_CHECKS consecutive
