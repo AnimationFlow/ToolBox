@@ -3,7 +3,7 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.2.0"
+MANAGER_VERSION="1.2.2"
 MANAGER_DATE="2026-04-17"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
@@ -686,6 +686,11 @@ TIME_STR=\$(echo "\$PANE_CONTENT" | grep -oE '([0-9]+h )?([0-9]+m )?[0-9]+s ·' 
 
 if [ -z "\$TIME_STR" ]; then
     rm -f "\$TOKEN_STATE"
+    LAST_SIG=\$(grep -vE "\] (ok\$|running |rate limit: timer already|post-restart)" "\$LOG" | tail -1 2>/dev/null)
+    if echo "\$LAST_SIG" | grep -q "INTERVENED"; then
+        echo "[\$(timestamp)] post-restart: sending 'continue' after watchdog restart" >> "\$LOG"
+        tmux -L ${socket} send-keys -t ${session} continue Enter
+    fi
     log_ok
     exit 0
 fi
@@ -700,6 +705,8 @@ if [ -n "\$OLD_TOKEN" ] && [ "\$TOKEN_STR" = "\$OLD_TOKEN" ]; then
     FROZEN_COUNT=\$(( \${OLD_COUNT:-0} + 1 ))
     if [ "\$FROZEN_COUNT" -ge "\$FROZEN_CHECKS" ]; then
         echo "[\$(timestamp)] INTERVENED: tokens stuck at \${TOKEN_STR} for \${FROZEN_COUNT} checks (\${TIME_STR}), restarting claude-${slug}" | tee -a "\$LOG"
+        echo "[\$(timestamp)] pane at freeze:" >> "\$LOG"
+        echo "\$PANE_CONTENT" | tail -20 | sed 's/^/  /' >> "\$LOG"
         rm -f "\$TOKEN_STATE"
         systemctl --user restart claude-${slug}
     else
