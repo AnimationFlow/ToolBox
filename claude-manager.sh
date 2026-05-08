@@ -3,8 +3,8 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.2.2"
-MANAGER_DATE="2026-04-17"
+MANAGER_VERSION="1.3.0"
+MANAGER_DATE="2026-05-08"
 _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
 
 # ── paths ─────────────────────────────────────────────────────────────────────
@@ -13,6 +13,8 @@ CLAUDE_BIN="${HOME}/.local/bin/claude"
 CLAUDE_JSON="${HOME}/.claude.json"
 WATCHDOG_LOG_DIR="${HOME}/.local/share/claude-watchdog"
 WATCHDOG_BIN_DIR="${HOME}/.local/bin"
+HEALTH_LOG_DIR="${HOME}/.local/share/claude-health"
+HEALTH_BIN_DIR="${HOME}/.local/bin"
 PNPM_HOME="${HOME}/.local/share/pnpm"
 SVC_PATH_ENV="PATH=${PNPM_HOME}:${HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -320,6 +322,7 @@ main_menu() {
 
         echo -e "  ${BOLD}n)${RESET} New instance"
         echo -e "  ${BOLD}m)${RESET} Manage MCPs (context7, mcp-installer)"
+        echo -e "  ${BOLD}h)${RESET} Health monitors"
         echo -e "  ${BOLD}q)${RESET} Quit"
         sep
         read -rp "  Choice: " choice
@@ -328,6 +331,7 @@ main_menu() {
             q|Q) echo; ok "Bye."; echo; exit 0 ;;
             n|N) new_instance_wizard ;;
             m|M) mcp_menu ;;
+            h|H) health_menu ;;
             i|I)
                 if ! cc_installed; then
                     install_cc_menu
@@ -755,6 +759,239 @@ _remove_watchdog() {
     rm -f "${SYSTEMD_DIR}/claude-watchdog-${slug}.service"
     rm -f "${WATCHDOG_BIN_DIR}/claude-watchdog-${slug}.sh"
     rm -f "${WATCHDOG_LOG_DIR}/${slug}.tokens"
+    systemctl --user daemon-reload
+}
+
+# ── health monitors ───────────────────────────────────────────────────────────
+health_menu() {
+    while true; do
+        hdr "Health Monitors"
+
+        local -a monitors=()
+        for svc in "${SYSTEMD_DIR}"/claude-health-*.timer; do
+            [[ -f "$svc" ]] || continue
+            local base; base=$(basename "$svc" .timer)
+            monitors+=("${base#claude-health-}")
+        done
+
+        if [[ ${#monitors[@]} -gt 0 ]]; then
+            echo -e "  ${BOLD}  # timer  name              last log${RESET}"
+            local i=1
+            for slug in "${monitors[@]}"; do
+                local hlog="${HEALTH_LOG_DIR}/${slug}.log"
+                local status_dot last_line=""
+                is_active "claude-health-${slug}.timer" \
+                    && status_dot="${GREEN}●${RESET}" || status_dot="${RED}○${RESET}"
+                [[ -f "$hlog" ]] && last_line=$(tail -1 "$hlog" 2>/dev/null)
+                printf "  ${BOLD}%3s)${RESET} %b ${BOLD}%-16s${RESET}  ${DIM}%s${RESET}\n" \
+                    "$i" "$status_dot" "$slug" "$last_line"
+                (( i++ ))
+            done
+            sep
+        else
+            echo -e "  ${DIM}No health monitors configured.${RESET}"
+            sep
+        fi
+
+        echo -e "  ${BOLD}n)${RESET} New monitor"
+        echo -e "  ${BOLD}b)${RESET} Back"
+        sep
+        read -rp "  Choice: " choice
+
+        case "$choice" in
+            n|N) _new_health_wizard ;;
+            b|B) return ;;
+            ''|*[!0-9]*) warn "Unknown option." ;;
+            *)
+                local idx=$(( choice - 1 ))
+                if [[ $idx -ge 0 && $idx -lt ${#monitors[@]} ]]; then
+                    _health_instance_menu "${monitors[$idx]}"
+                else
+                    warn "No such monitor."
+                fi
+                ;;
+        esac
+    done
+}
+
+_health_instance_menu() {
+    local slug="$1"
+    local hlog="${HEALTH_LOG_DIR}/${slug}.log"
+
+    while true; do
+        hdr "Health Monitor: ${slug}"
+        local status_dot
+        is_active "claude-health-${slug}.timer" \
+            && status_dot="${GREEN}● active${RESET}" || status_dot="${RED}○ inactive${RESET}"
+        echo -e "  Status: ${status_dot}"
+        [[ -f "$hlog" ]] && echo -e "  Last:   ${DIM}$(tail -1 "$hlog")${RESET}"
+        sep
+        echo -e "  ${BOLD}1)${RESET} Start timer"
+        echo -e "  ${BOLD}2)${RESET} Stop timer"
+        echo -e "  ${BOLD}3)${RESET} Run now"
+        echo -e "  ${BOLD}4)${RESET} View log (last 40 lines)"
+        echo -e "  ${BOLD}d)${RESET} Delete"
+        echo -e "  ${BOLD}b)${RESET} Back"
+        sep
+        read -rp "  Choice: " choice
+
+        case "$choice" in
+            1) systemctl --user start  "claude-health-${slug}.timer" && ok "Timer started." ;;
+            2) systemctl --user stop   "claude-health-${slug}.timer" && ok "Timer stopped." ;;
+            3) bash "${HEALTH_BIN_DIR}/claude-health-${slug}.sh"     && ok "Done." ;;
+            4)
+                sep
+                if [[ -f "$hlog" ]]; then tail -40 "$hlog"; else warn "No log yet."; fi
+                sep; pause
+                ;;
+            d|D) _remove_health_loop "$slug"; ok "Removed."; return ;;
+            b|B) return ;;
+            *) warn "Unknown option." ;;
+        esac
+    done
+}
+
+_new_health_wizard() {
+    hdr "New Health Monitor"
+
+    read -rp "  Name/slug [secretoffice]: " slug
+    slug="${slug:-secretoffice}"
+    slug=$(echo "$slug" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
+    [[ -n "$slug" ]] || { warn "Name cannot be empty."; return; }
+
+    if [[ -f "${SYSTEMD_DIR}/claude-health-${slug}.timer" ]]; then
+        warn "Monitor '${slug}' already exists. Select it from the list to manage it."
+        return
+    fi
+
+    read -rp "  Compose project label [st-office]: " compose_project
+    compose_project="${compose_project:-st-office}"
+
+    read -rp "  DB container name [postgres]: " db_container
+    db_container="${db_container:-postgres}"
+
+    read -rp "  DB user [st_office]: " db_user
+    db_user="${db_user:-st_office}"
+
+    read -rp "  DB name [st-office]: " db_name
+    db_name="${db_name:-st-office}"
+
+    read -rp "  DB schema [st_office]: " db_schema
+    db_schema="${db_schema:-st_office}"
+
+    read -rp "  Stuck invoice threshold minutes [30]: " stuck_min
+    stuck_min="${stuck_min:-30}"
+
+    read -rp "  Check interval minutes [60]: " interval_min
+    interval_min="${interval_min:-60}"
+
+    _create_health_loop "$slug" "$compose_project" "$db_container" \
+        "$db_user" "$db_name" "$db_schema" "$stuck_min" "$interval_min"
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now "claude-health-${slug}.timer"
+    ok "Health monitor '${slug}' enabled (every ${interval_min}min)."
+}
+
+_create_health_loop() {
+    local slug="$1" compose_project="$2" db_container="$3"
+    local db_user="$4" db_name="$5" db_schema="$6"
+    local stuck_min="${7:-30}" interval_min="${8:-60}"
+
+    local script="${HEALTH_BIN_DIR}/claude-health-${slug}.sh"
+    local hlog="${HEALTH_LOG_DIR}/${slug}.log"
+
+    mkdir -p "$HEALTH_LOG_DIR"
+
+    cat > "$script" <<HEOF
+#!/bin/bash
+LOG="${hlog}"
+COMPOSE_PROJECT="${compose_project}"
+DB_CONTAINER="${db_container}"
+DB_USER="${db_user}"
+DB_NAME="${db_name}"
+DB_SCHEMA="${db_schema}"
+STUCK_MIN=${stuck_min}
+
+log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$*" | tee -a "\$LOG"; }
+
+trim_log() {
+    [ -s "\$LOG" ] || return
+    local cutoff tmp
+    cutoff=\$(date -d '7 days ago' '+%Y-%m-%d')
+    tmp=\$(mktemp)
+    awk -v d="\$cutoff" '{if(!/^\[/ || substr(\$1,2,10) >= d) print}' "\$LOG" > "\$tmp" && mv "\$tmp" "\$LOG"
+}
+trim_log
+
+log "--- check ---"
+
+# Containers
+bad=\$(podman ps -a --filter "label=io.podman.compose.project=\$COMPOSE_PROJECT" \\
+    --format "{{.Names}} {{.Status}}" 2>/dev/null \\
+    | grep -Ev "(healthy|Up)" | grep -v "^\$")
+if [ -n "\$bad" ]; then
+    log "WARN containers: \$bad"
+else
+    log "OK containers"
+fi
+
+# Stuck invoices
+stuck=\$(podman exec "\$DB_CONTAINER" psql -U "\$DB_USER" -d "\$DB_NAME" -t -c \\
+    "SELECT COUNT(*) FROM \${DB_SCHEMA}.invoices
+     WHERE status IN ('queued','processing')
+       AND created_at < NOW() - INTERVAL '\${STUCK_MIN} minutes';" \\
+    2>/dev/null | tr -d ' \n')
+if [ "\${stuck:-0}" -gt 0 ] 2>/dev/null; then
+    log "WARN stuck invoices: \$stuck (>\${STUCK_MIN}min)"
+else
+    log "OK queue (stuck=\${stuck:-0})"
+fi
+
+# Disk
+usage=\$(df -h /home 2>/dev/null | awk 'NR==2{print \$5}')
+pct=\$(df /home 2>/dev/null | awk 'NR==2{gsub(/%/,"",\$5); print \$5}')
+if [ "\${pct:-0}" -ge 85 ]; then
+    log "WARN disk /home: \${usage} used"
+else
+    log "OK disk /home: \${usage}"
+fi
+HEOF
+    chmod +x "$script"
+    ok "Health script: ${script}"
+
+    cat > "${SYSTEMD_DIR}/claude-health-${slug}.service" <<EOF
+[Unit]
+Description=Claude Health Monitor - ${slug}
+
+[Service]
+Type=oneshot
+ExecStart=${script}
+StandardOutput=journal
+StandardError=journal
+EOF
+
+    cat > "${SYSTEMD_DIR}/claude-health-${slug}.timer" <<EOF
+[Unit]
+Description=Claude Health Monitor Timer - ${slug}
+
+[Timer]
+OnBootSec=${interval_min}min
+OnUnitActiveSec=${interval_min}min
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target
+EOF
+    ok "Service + timer created."
+}
+
+_remove_health_loop() {
+    local slug="$1"
+    systemctl --user disable --now "claude-health-${slug}.timer" 2>/dev/null || true
+    rm -f "${SYSTEMD_DIR}/claude-health-${slug}.timer"
+    rm -f "${SYSTEMD_DIR}/claude-health-${slug}.service"
+    rm -f "${HEALTH_BIN_DIR}/claude-health-${slug}.sh"
     systemctl --user daemon-reload
 }
 
