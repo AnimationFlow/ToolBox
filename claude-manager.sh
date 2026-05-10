@@ -11,8 +11,7 @@ _MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/c
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
 CLAUDE_BIN="${HOME}/.local/bin/claude"
 CLAUDE_JSON="${HOME}/.claude.json"
-WATCHDOG_LOG_DIR="${HOME}/.local/share/claude-watchdog"
-WATCHDOG_BIN_DIR="${HOME}/.local/bin"
+WATCHDOG_SCRIPT="${HOME}/.claude/scripts/claude-watchdog.sh"
 HEALTH_LOG_DIR="${HOME}/.local/share/claude-health"
 HEALTH_BIN_DIR="${HOME}/.local/bin"
 PNPM_HOME="${HOME}/.local/share/pnpm"
@@ -375,7 +374,7 @@ instance_menu() {
     session=$(_svc_field "$slug" session)
     workdir=$(_svc_field "$slug" workdir)
     rcname=$(_svc_field  "$slug" rcname)
-    local wlog="${WATCHDOG_LOG_DIR}/${slug}.log"
+    local wlog="${workdir}/claude-watchdog.log"
 
     while true; do
         hdr "Instance: ${rcname}"
@@ -431,7 +430,7 @@ instance_menu() {
                 if [[ -f "${SYSTEMD_DIR}/claude-watchdog-${slug}.timer" ]]; then
                     _remove_watchdog "$slug" && ok "Watchdog removed."
                 else
-                    _create_watchdog "$slug" "$socket" "$session" && ok "Watchdog added."
+                    _create_watchdog "$slug" "$socket" "$session" "$workdir" && ok "Watchdog added."
                     systemctl --user daemon-reload
                     systemctl --user enable --now "claude-watchdog-${slug}.timer" && ok "Timer enabled."
                 fi
@@ -520,7 +519,7 @@ EOF
 
     # Watchdog
     if [[ "${wd_ans,,}" != "n" ]]; then
-        _create_watchdog "$slug" "$slug" "claude-${slug}"
+        _create_watchdog "$slug" "$slug" "claude-${slug}" "$workdir"
     fi
 
     systemctl --user daemon-reload
@@ -581,149 +580,7 @@ PYEOF
 
 # ── watchdog creation / removal ───────────────────────────────────────────────
 _create_watchdog() {
-    local slug="$1" socket="$2" session="$3"
-    local script="${WATCHDOG_BIN_DIR}/claude-watchdog-${slug}.sh"
-    local wlog="${WATCHDOG_LOG_DIR}/${slug}.log"
-    local wresume="${WATCHDOG_LOG_DIR}/${slug}.resume"
-    local wtokens="${WATCHDOG_LOG_DIR}/${slug}.tokens"
-
-    mkdir -p "$WATCHDOG_LOG_DIR"
-
-    cat > "$script" <<WEOF
-#!/bin/bash
-LOG="${wlog}"
-TOKEN_STATE="${wtokens}"
-FROZEN_CHECKS=3    # 3 × 5min timer = 15min of unchanged tokens → declare stuck
-
-timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
-
-log_ok() {
-    if [ -s "\$LOG" ] && tail -1 "\$LOG" | grep -q "\] ok\$"; then
-        local tmp=\$(mktemp); head -n -1 "\$LOG" > "\$tmp" && mv "\$tmp" "\$LOG"
-    fi
-    echo "[\$(timestamp)] ok" >> "\$LOG"
-}
-
-trim_log() {
-    [ -s "\$LOG" ] || return
-    local cutoff tmp
-    cutoff=\$(date -d '3 days ago' '+%Y-%m-%d')
-    tmp=\$(mktemp)
-    awk -v d="\$cutoff" '{if(!/^\[/ || substr(\$1,2,10) >= d) print}' "\$LOG" > "\$tmp" && mv "\$tmp" "\$LOG"
-}
-trim_log
-
-CURRENT_CMD=\$(tmux -L ${socket} list-panes -t ${session} -F '#{pane_current_command}' 2>/dev/null)
-
-if [ -z "\$CURRENT_CMD" ]; then
-    echo "[\$(timestamp)] INTERVENED: tmux session missing, restarting claude-${slug}" | tee -a "\$LOG"
-    systemctl --user restart claude-${slug}; exit 0
-fi
-
-if [ "\$CURRENT_CMD" != "claude" ]; then
-    echo "[\$(timestamp)] INTERVENED: process is '\${CURRENT_CMD}' (not claude), restarting claude-${slug}" | tee -a "\$LOG"
-    systemctl --user restart claude-${slug}; exit 0
-fi
-
-PANE_CONTENT=\$(tmux -L ${socket} capture-pane -t ${session} -p 2>/dev/null)
-
-# Rate limit dialog — option 1 is pre-selected, just send Enter
-if echo "\$PANE_CONTENT" | grep -q "rate-limit-options\|Stop and wait for limit"; then
-    echo "[\$(timestamp)] rate limit dialog detected, sending Enter" >> "\$LOG"
-    tmux -L ${socket} send-keys -t ${session} Enter
-    exit 0
-fi
-
-# Scroll prompt — blocking dialog takes over the whole pane, so the ❯ prompt disappears.
-# Only dismiss if scroll hint is present AND no ❯ prompt visible (rules out tool output).
-if echo "\$PANE_CONTENT" | grep -q "to scroll · Space, Enter, or Escape to dismiss" && \
-   ! echo "\$PANE_CONTENT" | grep -q "^❯"; then
-    echo "[\$(timestamp)] scroll prompt detected (no input prompt visible), sending Escape" >> "\$LOG"
-    tmux -L ${socket} send-keys -t ${session} Escape
-    exit 0
-fi
-
-if echo "\$PANE_CONTENT" | grep -q "Resume from summary"; then
-    RESUME_STATE="${wresume}"
-    RESUME_COUNT=\$(cat "\$RESUME_STATE" 2>/dev/null || echo 0)
-    RESUME_COUNT=\$(( RESUME_COUNT + 1 ))
-    echo "\$RESUME_COUNT" > "\$RESUME_STATE"
-    if [ "\$RESUME_COUNT" -ge 5 ]; then
-        echo "[\$(timestamp)] INTERVENED: resume dialog stuck for \${RESUME_COUNT} checks, restarting claude-${slug}" | tee -a "\$LOG"
-        systemctl --user restart claude-${slug}; rm -f "\$RESUME_STATE"
-    else
-        echo "[\$(timestamp)] resume dialog detected (attempt \${RESUME_COUNT}/5), sending Enter" >> "\$LOG"
-        tmux -L ${socket} send-keys -t ${session} Enter
-    fi
-    exit 0
-fi
-rm -f "${wresume}"
-
-# Rate limit cooldown — schedule "continue" +60s after reset, log-based dedup
-if echo "\$PANE_CONTENT" | grep -qE 'resets [A-Za-z]+ [0-9]+, [0-9]+[ap]m'; then
-    LIMIT_LINE=\$(echo "\$PANE_CONTENT" | grep -oE 'resets [A-Za-z]+ [0-9]+, [0-9]+[ap]m \([^)]+\)' | head -1)
-    RESET_STR=\$(echo "\$LIMIT_LINE" | grep -oE '[A-Za-z]+ [0-9]+, [0-9]+[ap]m')
-    RESET_TZ=\$(echo "\$LIMIT_LINE" | sed 's/.*(\([^)]*\))/\1/')
-    RESET_TS=\$(TZ="\${RESET_TZ:-UTC}" date -d "\$(echo "\$RESET_STR" | sed 's/,//')" +%s 2>/dev/null)
-    if [[ -n "\$RESET_TS" ]]; then
-        if grep -q "rate limit.*scheduled.*\${RESET_STR}" "\$LOG" 2>/dev/null; then
-            echo "[\$(timestamp)] rate limit: timer already pending (resets \${RESET_STR} \${RESET_TZ})" >> "\$LOG"
-        else
-            SLEEP_SECS=\$(( RESET_TS - \$(date +%s) + 60 ))
-            [[ \$SLEEP_SECS -lt 60 ]] && SLEEP_SECS=60
-            systemd-run --user --on-active="\${SLEEP_SECS}s" \
-                --description="Claude rate limit resume - ${slug}" \
-                -- tmux -L ${socket} send-keys -t ${session} continue Enter 2>/dev/null \
-            && echo "[\$(timestamp)] rate limit: 'continue' scheduled in \${SLEEP_SECS}s (resets \${RESET_STR} \${RESET_TZ})" >> "\$LOG" \
-            || echo "[\$(timestamp)] rate limit: failed to schedule timer (resets \${RESET_STR} \${RESET_TZ})" >> "\$LOG"
-        fi
-    else
-        echo "[\$(timestamp)] rate limit: could not parse reset time from: \${LIMIT_LINE}" >> "\$LOG"
-    fi
-    log_ok; exit 0
-fi
-
-# Stopwatch "(Xh Xm Xs · ↓ N tokens)" only appears during active tool calls.
-# Log elapsed + tokens every check. If tokens unchanged for FROZEN_CHECKS consecutive
-# checks (stopwatch keeps ticking = tool running but Claude isn't generating) → restart.
-TIME_STR=\$(echo "\$PANE_CONTENT" | grep -oE '([0-9]+h )?([0-9]+m )?[0-9]+s ·' | head -1 | sed 's/ ·\$//')
-
-if [ -z "\$TIME_STR" ]; then
-    rm -f "\$TOKEN_STATE"
-    LAST_SIG=\$(grep -vE "\] (ok\$|running |rate limit: timer already|post-restart)" "\$LOG" | tail -1 2>/dev/null)
-    if echo "\$LAST_SIG" | grep -q "INTERVENED"; then
-        echo "[\$(timestamp)] post-restart: sending 'continue' after watchdog restart" >> "\$LOG"
-        tmux -L ${socket} send-keys -t ${session} continue Enter
-    fi
-    log_ok
-    exit 0
-fi
-
-TOKEN_STR=\$(echo "\$PANE_CONTENT" | grep -oE '[0-9]+(\.[0-9]+)?k? tokens' | head -1)
-
-OLD_LINE=\$(cat "\$TOKEN_STATE" 2>/dev/null || echo ":")
-OLD_TOKEN="\${OLD_LINE%%:*}"
-OLD_COUNT="\${OLD_LINE##*:}"
-
-if [ -n "\$OLD_TOKEN" ] && [ "\$TOKEN_STR" = "\$OLD_TOKEN" ]; then
-    FROZEN_COUNT=\$(( \${OLD_COUNT:-0} + 1 ))
-    if [ "\$FROZEN_COUNT" -ge "\$FROZEN_CHECKS" ]; then
-        echo "[\$(timestamp)] INTERVENED: tokens stuck at \${TOKEN_STR} for \${FROZEN_COUNT} checks (\${TIME_STR}), restarting claude-${slug}" | tee -a "\$LOG"
-        echo "[\$(timestamp)] pane at freeze:" >> "\$LOG"
-        echo "\$PANE_CONTENT" | tail -20 | sed 's/^/  /' >> "\$LOG"
-        rm -f "\$TOKEN_STATE"
-        systemctl --user restart claude-${slug}
-    else
-        echo "[\$(timestamp)] running \${TIME_STR} — tokens unchanged: \${TOKEN_STR} (\${FROZEN_COUNT}/\${FROZEN_CHECKS})" >> "\$LOG"
-        echo "\${TOKEN_STR}:\${FROZEN_COUNT}" > "\$TOKEN_STATE"
-    fi
-else
-    echo "[\$(timestamp)] running \${TIME_STR} — tokens: \${TOKEN_STR}" >> "\$LOG"
-    echo "\${TOKEN_STR}:0" > "\$TOKEN_STATE"
-fi
-WEOF
-    chmod +x "$script"
-    ok "Watchdog script: ${script}"
+    local slug="$1" socket="$2" session="$3" work_dir="${4:-${HOME}}"
 
     cat > "${SYSTEMD_DIR}/claude-watchdog-${slug}.service" <<EOF
 [Unit]
@@ -732,7 +589,7 @@ After=claude-${slug}.service
 
 [Service]
 Type=oneshot
-ExecStart=${script}
+ExecStart=/bin/bash ${WATCHDOG_SCRIPT} ${slug} ${work_dir}
 StandardOutput=journal
 StandardError=journal
 EOF
@@ -752,13 +609,12 @@ EOF
     ok "Watchdog service + timer created."
 }
 
+
 _remove_watchdog() {
     local slug="$1"
     systemctl --user disable --now "claude-watchdog-${slug}.timer" 2>/dev/null || true
     rm -f "${SYSTEMD_DIR}/claude-watchdog-${slug}.timer"
     rm -f "${SYSTEMD_DIR}/claude-watchdog-${slug}.service"
-    rm -f "${WATCHDOG_BIN_DIR}/claude-watchdog-${slug}.sh"
-    rm -f "${WATCHDOG_LOG_DIR}/${slug}.tokens"
     systemctl --user daemon-reload
 }
 
