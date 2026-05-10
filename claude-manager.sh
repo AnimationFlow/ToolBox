@@ -3,9 +3,9 @@
 
 set -uo pipefail
 
-MANAGER_VERSION="1.3.0"
-MANAGER_DATE="2026-05-08"
-_MANAGER_RAW_URL="https://github.com/AnimationFlow/ToolBox/raw/refs/heads/main/claude-manager.sh"
+MANAGER_VERSION="1.3.1"
+MANAGER_DATE="2026-05-10"
+_MANAGER_RAW_URL="https://bitbucket.org/animation-flow/claude/raw/main/claude-manager.sh"
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
