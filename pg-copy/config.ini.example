@@ -1,0 +1,13 @@
+[stage]
+host     = stage-db-hostname
+port     = 5432
+dbname   = your_stage_db
+user     = your_user
+password = your_password
+
+[local]
+host     = localhost
+port     = 5432
+dbname   = your_local_db
+user     = postgres
+password = your_password
